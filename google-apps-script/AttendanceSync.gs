@@ -116,6 +116,11 @@ function duration_(record) {
   return Math.floor(minutes/60)+":"+String(minutes%60).padStart(2,"0");
 }
 
+function safeSheetText_(value){
+  const text=String(value??"");
+  return /^[=+@]/.test(text)?("'"+text):text;
+}
+
 function rowFromAttendance_(record){
   const status={
     open:"Яваагүй",
@@ -215,7 +220,7 @@ function syncInfo_(book,records){
   }
   const rows=[...groups.values()].sort((a,b)=>
     b.ym.localeCompare(a.ym)||a.code.localeCompare(b.code)).map(x=>[
-    x.ym,x.from,x.to,x.code,x.name,x.branch,x.completed,
+    x.ym,x.from,x.to,x.code,safeSheetText_(x.name),safeSheetText_(x.branch),x.completed,
     Math.floor(x.minutes/60)+":"+String(x.minutes%60).padStart(2,"0"),x.missing,x.open
   ]);
   // Info is an auto-generated tab. Preserve headers and only replace its summary rows.
