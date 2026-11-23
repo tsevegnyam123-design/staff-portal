@@ -94,14 +94,45 @@ function createEmployeeSheet_(book,code,displayName){
   const title=book.getSheetByName(base)?(base+" ("+code+")"):base;
   const tab=book.insertSheet(title);
   tab.getRange("A1").setValue("GS25_ID="+code);
-  tab.getRange("A2:F2").setValues([[
-    "Өдөр","Ирсэн цаг","Явсан цаг","Нийт ажилласан цаг","Тайлбар","Portal record ID"
+  ensureEmployeeLayout_(tab);
+  tab.getRange("A2:E2").setValues([[
+    "Өдөр","Ирсэн цаг","Явсан цаг","Нийт ажилласан цаг","Тайлбар"
   ]]);
-  tab.getRange("A2:F2").setBackground("#244d99").setFontColor("#ffffff").setFontWeight("bold");
+  tab.getRange("A2:H2").setBackground("#244d99").setFontColor("#ffffff").setFontWeight("bold");
   tab.setFrozenRows(2);
   tab.setColumnWidths(1,5,155);
-  tab.hideColumns(6);
   return tab;
+}
+
+/** Preserve existing portal IDs when migrating old F-id sheet to F/G day/night + H-id. */
+function ensureEmployeeLayout_(tab){
+  if(tab.getMaxColumns()<8){
+    tab.insertColumnsAfter(tab.getMaxColumns(),8-tab.getMaxColumns());
+  }
+  const fHeader=String(tab.getRange("F2").getDisplayValue()).trim();
+  const hHeader=String(tab.getRange("H2").getDisplayValue()).trim();
+  if(fHeader && fHeader!=="Өдрийн цаг" && fHeader!=="Portal record ID"){
+    throw new Error("Unexpected F2 header in "+tab.getName()+": "+fHeader);
+  }
+  if(hHeader && hHeader!=="Portal record ID"){
+    throw new Error("Unexpected H2 header in "+tab.getName()+": "+hHeader);
+  }
+  if(fHeader==="Portal record ID"){
+    const last=tab.getLastRow();
+    if(last>=3){
+      const oldIds=tab.getRange(3,6,last-2,1).getDisplayValues();
+      const storedIds=tab.getRange(3,8,last-2,1).getDisplayValues();
+      const merged=oldIds.map((line,i)=>[storedIds[i][0] || line[0] || ""]);
+      tab.getRange(3,8,last-2,1).setValues(merged);
+      tab.getRange(3,6,last-2,1).clearContent();
+    }
+  }
+  tab.getRange("F2:H2").setValues([["Өдрийн цаг","Шөнийн цаг","Portal record ID"]]);
+  tab.getRange("F2:H2").setBackground("#244d99").setFontColor("#ffffff").setFontWeight("bold");
+  tab.showColumns(6);
+  tab.showColumns(7);
+  tab.hideColumns(8);
+  tab.setColumnWidths(6,2,135);
 }
 
 function timeInUlaanbaatar_(timestamp) {
@@ -109,11 +140,54 @@ function timeInUlaanbaatar_(timestamp) {
     new Date(timestamp),GS25_ATTENDANCE.timezone,"HH:mm"):"";
 }
 
-function duration_(record) {
-  if(record.status!=="completed"||!record.check_out_at)return "-";
-  const minutes=Math.round((Date.parse(record.check_out_at)-Date.parse(record.check_in_at))/60000);
-  if(!Number.isFinite(minutes)||minutes<0)return "-";
+function formatHours_(minutes){
   return Math.floor(minutes/60)+":"+String(minutes%60).padStart(2,"0");
+}
+
+/** Return UTC milliseconds for a local hour in Asia/Ulaanbaatar. */
+function localHourUtc_(dateKey,hour){
+  const localMs=Date.parse(dateKey+"T"+String(hour).padStart(2,"0")+":00:00Z");
+  if(!Number.isFinite(localMs))throw new Error("Invalid local date");
+  let offset=Utilities.formatDate(new Date(localMs),GS25_ATTENDANCE.timezone,"Z");
+  const offsetMinutes=o=>(o[0]==="-"?-1:1)*
+    (Number(o.slice(1,3))*60+Number(o.slice(3,5)));
+  let utcMs=localMs-offsetMinutes(offset)*60000;
+  const actual=Utilities.formatDate(new Date(utcMs),GS25_ATTENDANCE.timezone,"Z");
+  if(actual!==offset)utcMs=localMs-offsetMinutes(actual)*60000;
+  return utcMs;
+}
+
+function nextIsoDate_(dateKey,delta){
+  return new Date(Date.parse(dateKey+"T00:00:00Z")+delta*86400000)
+    .toISOString().slice(0,10);
+}
+
+/** Split completed attendance by 22:00-06:00 NIGHT; all remaining time is DAY.
+    Minutes are calculated from absolute server timestamps, including midnight crossings.
+    Unconfirmed auto-closed attendance never contributes work hours. */
+function dayNightMinutes_(record){
+  if(record.status!=="completed"||!record.check_out_at||!record.check_in_at)return null;
+  const start=Date.parse(record.check_in_at),end=Date.parse(record.check_out_at);
+  if(!Number.isFinite(start)||!Number.isFinite(end)||end<start||end-start>48*3600000)return null;
+  const total=Math.round((end-start)/60000);
+  const startLocalDate=Utilities.formatDate(new Date(start),GS25_ATTENDANCE.timezone,"yyyy-MM-dd");
+  const span=Math.ceil((end-start)/86400000)+3;
+  let nightMs=0;
+  // Include previous evening's night window for check-ins before 06:00.
+  for(let i=-1;i<span;i++){
+    const day=nextIsoDate_(startLocalDate,i);
+    const next=nextIsoDate_(day,1);
+    const nightStart=localHourUtc_(day,22);
+    const nightEnd=localHourUtc_(next,6);
+    nightMs+=Math.max(0,Math.min(end,nightEnd)-Math.max(start,nightStart));
+  }
+  const night=Math.max(0,Math.min(total,Math.round(nightMs/60000)));
+  return {total,day:total-night,night};
+}
+
+function duration_(record) {
+  const split=dayNightMinutes_(record);
+  return split?formatHours_(split.total):"-";
 }
 
 function safeSheetText_(value){
@@ -133,6 +207,8 @@ function rowFromAttendance_(record){
     timeInUlaanbaatar_(record.check_out_at)||"",
     duration_(record),
     status,
+    (dayNightMinutes_(record)?formatHours_(dayNightMinutes_(record).day):"-"),
+    (dayNightMinutes_(record)?formatHours_(dayNightMinutes_(record).night):"-"),
     String(record.id)
   ];
 }
@@ -144,10 +220,11 @@ function syncEmployeeSheets_(records,tabs){
     (grouped[code]||(grouped[code]=[])).push(record);
   }
   for(const [code,tab] of Object.entries(tabs)){
+    ensureEmployeeLayout_(tab);
     const items=(grouped[code]||[]).sort((a,b)=>String(a.check_in_at).localeCompare(String(b.check_in_at)));
     if(!items.length)continue;
     const last=Math.max(2,tab.getLastRow());
-    const existing=last>=3?tab.getRange(3,6,last-2,1).getDisplayValues().flat():[];
+    const existing=last>=3?tab.getRange(3,8,last-2,1).getDisplayValues().flat():[];
     const byId=new Map();
     existing.forEach((id,i)=>{if(id)byId.set(String(id),i+3);});
     const newRows=[];
@@ -156,9 +233,9 @@ function syncEmployeeSheets_(records,tabs){
       const id=String(record.id);
       if(byId.has(id)){
         const rowIdx=byId.get(id);
-        const current=tab.getRange(rowIdx,1,1,6).getDisplayValues()[0];
+        const current=tab.getRange(rowIdx,1,1,8).getDisplayValues()[0];
         if(current.some((value,i)=>String(value)!==String(row[i]))) {
-          tab.getRange(rowIdx,1,1,6).setValues([row]);
+          tab.getRange(rowIdx,1,1,8).setValues([row]);
         }
         markAttendanceStatus_(tab,rowIdx,record.status);
       }else{
@@ -169,7 +246,7 @@ function syncEmployeeSheets_(records,tabs){
       const index=Math.max(3,tab.getLastRow()+1);
       if(tab.getMaxRows()<index+newRows.length-1)
         tab.insertRowsAfter(tab.getMaxRows(),index+newRows.length-1-tab.getMaxRows());
-      tab.getRange(index,1,newRows.length,6).setValues(newRows.map(v=>v.row));
+      tab.getRange(index,1,newRows.length,8).setValues(newRows.map(v=>v.row));
       for(let i=0;i<newRows.length;i++) markAttendanceStatus_(tab,index+i,newRows[i].record.status);
     }
   }
@@ -194,12 +271,18 @@ function syncInfo_(book,records){
   let info=book.getSheetByName("Info");
   if(!info){
     info=book.insertSheet("Info");
-    info.getRange("A2:J2").setValues([[
+    if(info.getMaxColumns()<12)info.insertColumnsAfter(info.getMaxColumns(),12-info.getMaxColumns());
+    info.getRange("A2:L2").setValues([[
       "Цалингийн сар","Мөчлөг эхлэх","Мөчлөг дуусах","Ажилтны код","Ажилтны нэр","Салбар",
-      "Хэвийн ирц (хоног)","Ажилласан цаг","Явсан дараагүй","Нээлттэй"
+      "Хэвийн ирц (хоног)","Ажилласан цаг","Явсан дараагүй","Нээлттэй",
+      "Өдрийн цаг","Шөнийн цаг"
     ]]);
     info.setFrozenRows(2);
   }
+  if(info.getMaxColumns()<12)info.insertColumnsAfter(info.getMaxColumns(),12-info.getMaxColumns());
+  info.getRange("K2:L2").setValues([["Өдрийн цаг","Шөнийн цаг"]]);
+  info.getRange("K2:L2").setBackground("#244d99").setFontColor("#ffffff").setFontWeight("bold");
+  info.setColumnWidths(11,2,140);
   const groups=new Map();
   for(const rec of records){
     const period=payrollCycle_(String(rec.work_date));
@@ -207,13 +290,14 @@ function syncInfo_(book,records){
     if(!groups.has(key))groups.set(key,{
       ym:period.ym,from:period.from,to:period.to,
       code:String(rec.employee_code),name:String(rec.display_name),
-      branch:String(rec.branch_code),completedDays:new Set(),minutes:0,missing:0,open:0
+      branch:String(rec.branch_code),completedDays:new Set(),minutes:0,dayMinutes:0,nightMinutes:0,missing:0,open:0
     });
     const row=groups.get(key);
     if(rec.status==="completed"){
-      const duration=Math.round((Date.parse(rec.check_out_at)-Date.parse(rec.check_in_at))/60000);
-      if(Number.isFinite(duration)&&duration>=0){
-        row.completedDays.add(String(rec.work_date));row.minutes+=duration;
+      const split=dayNightMinutes_(rec);
+      if(split){
+        row.completedDays.add(String(rec.work_date));
+        row.minutes+=split.total;row.dayMinutes+=split.day;row.nightMinutes+=split.night;
       }
     }else if(rec.status==="auto_missing_out")row.missing++;
     else if(rec.status==="open")row.open++;
@@ -221,14 +305,15 @@ function syncInfo_(book,records){
   const rows=[...groups.values()].sort((a,b)=>
     b.ym.localeCompare(a.ym)||a.code.localeCompare(b.code)).map(x=>[
     x.ym,x.from,x.to,x.code,safeSheetText_(x.name),safeSheetText_(x.branch),x.completedDays.size,
-    Math.floor(x.minutes/60)+":"+String(x.minutes%60).padStart(2,"0"),x.missing,x.open
+    formatHours_(x.minutes),x.missing,x.open,
+    formatHours_(x.dayMinutes),formatHours_(x.nightMinutes)
   ]);
   // Info is an auto-generated tab. Preserve headers and only replace its summary rows.
   const oldLast=info.getLastRow();
-  if(oldLast>2) info.getRange(3,1,oldLast-2,10).clearContent();
+  if(oldLast>2) info.getRange(3,1,oldLast-2,12).clearContent();
   if(rows.length){
     if(info.getMaxRows()<rows.length+2)
       info.insertRowsAfter(info.getMaxRows(),rows.length+2-info.getMaxRows());
-    info.getRange(3,1,rows.length,10).setValues(rows);
+    info.getRange(3,1,rows.length,12).setValues(rows);
   }
 }
