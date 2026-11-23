@@ -207,20 +207,20 @@ function syncInfo_(book,records){
     if(!groups.has(key))groups.set(key,{
       ym:period.ym,from:period.from,to:period.to,
       code:String(rec.employee_code),name:String(rec.display_name),
-      branch:String(rec.branch_code),completed:0,minutes:0,missing:0,open:0
+      branch:String(rec.branch_code),completedDays:new Set(),minutes:0,missing:0,open:0
     });
     const row=groups.get(key);
     if(rec.status==="completed"){
       const duration=Math.round((Date.parse(rec.check_out_at)-Date.parse(rec.check_in_at))/60000);
       if(Number.isFinite(duration)&&duration>=0){
-        row.completed++;row.minutes+=duration;
+        row.completedDays.add(String(rec.work_date));row.minutes+=duration;
       }
     }else if(rec.status==="auto_missing_out")row.missing++;
     else if(rec.status==="open")row.open++;
   }
   const rows=[...groups.values()].sort((a,b)=>
     b.ym.localeCompare(a.ym)||a.code.localeCompare(b.code)).map(x=>[
-    x.ym,x.from,x.to,x.code,safeSheetText_(x.name),safeSheetText_(x.branch),x.completed,
+    x.ym,x.from,x.to,x.code,safeSheetText_(x.name),safeSheetText_(x.branch),x.completedDays.size,
     Math.floor(x.minutes/60)+":"+String(x.minutes%60).padStart(2,"0"),x.missing,x.open
   ]);
   // Info is an auto-generated tab. Preserve headers and only replace its summary rows.
