@@ -185,13 +185,18 @@ async function attendanceStatus(user, month) {
   await db("POST","/rest/v1/rpc/portal_v2_attendance_auto_close",{});
   const sites=await db("GET","/rest/v1/portal_v2_attendance_sites?select=branch_code,latitude,longitude,radius_m&branch_code=eq."+q(user.branch_code)+"&limit=1");
   const site=sites?.[0]||null;
-  const attendance=await db("GET","/rest/v1/portal_v2_attendance?select=id,work_date,check_in_at,check_out_at,status,auto_due_at&employee_code=eq."+
-    q(user.employee_code)+"&work_date=gte."+range.from+"&work_date=lt."+range.next+"&order=check_in_at.desc&limit=150");
+  const [attendance, currentlyOpen]=await Promise.all([
+    db("GET","/rest/v1/portal_v2_attendance?select=id,work_date,check_in_at,check_out_at,status,auto_due_at&employee_code=eq."+
+      q(user.employee_code)+"&work_date=gte."+range.from+"&work_date=lt."+range.next+"&order=check_in_at.desc&limit=150"),
+    db("GET","/rest/v1/portal_v2_attendance?select=id,work_date,check_in_at,check_out_at,status,auto_due_at&employee_code=eq."+
+      q(user.employee_code)+"&status=eq.open&limit=1")
+  ]);
   // Employee never receives the configured branch centre coordinates.
   return {
     configured:!!site,
     site:user.access_role==="manager"?site:null,
     period:range,
+    open:currentlyOpen?.[0]||null,
     entries:attendance
   };
 }
@@ -273,7 +278,9 @@ async function handler(req, res) {
     }
     if (action === "attendanceClock" && req.method === "POST") {
       ensure(["in","out"].includes(data.type),400,"Ирсэн эсвэл Явсан үйлдэл сонгоно уу.");
-      const lat=Number(data.latitude),lng=Number(data.longitude),accuracy=Number(data.accuracy);
+      ensure(typeof data.latitude==="number"&&typeof data.longitude==="number"&&
+        typeof data.accuracy==="number",400,"Байршлын мэдээлэл буруу байна.");
+      const lat=data.latitude,lng=data.longitude,accuracy=data.accuracy;
       ensure(Number.isFinite(lat)&&Number.isFinite(lng)&&Number.isFinite(accuracy),400,"Байршлын мэдээлэл буруу байна.");
       const record=await db("POST","/rest/v1/rpc/portal_v2_attendance_clock",{
         p_employee:user.employee_code,p_action:data.type,p_lat:lat,p_lng:lng,p_accuracy:accuracy
@@ -282,7 +289,8 @@ async function handler(req, res) {
     }
     if (action === "attendanceSetSite" && req.method === "POST") {
       checkManager(user);
-      const lat=Number(data.latitude),lng=Number(data.longitude),radius=Number(data.radius);
+      ensure(typeof data.latitude==="number"&&typeof data.longitude==="number",400,"Байршлын мэдээлэл буруу байна.");
+      const lat=data.latitude,lng=data.longitude,radius=Number(data.radius);
       ensure(Number.isFinite(lat)&&Number.isFinite(lng)&&Number.isInteger(radius)&&radius>=50&&radius<=500,
         400,"Салбарын байршил, радиус буруу байна.");
       await db("POST","/rest/v1/rpc/portal_v2_attendance_set_site",{
