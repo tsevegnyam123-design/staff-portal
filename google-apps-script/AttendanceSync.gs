@@ -201,14 +201,15 @@ function rowFromAttendance_(record){
     completed:"Хэвийн",
     auto_missing_out:"Явсан дараагүй"
   }[record.status]||"Шалгах";
+  const split=dayNightMinutes_(record);
   return [
     String(record.work_date).replace(/-/g,"/"),
     timeInUlaanbaatar_(record.check_in_at),
     timeInUlaanbaatar_(record.check_out_at)||"",
-    duration_(record),
+    split?formatHours_(split.total):"-",
     status,
-    (dayNightMinutes_(record)?formatHours_(dayNightMinutes_(record).day):"-"),
-    (dayNightMinutes_(record)?formatHours_(dayNightMinutes_(record).night):"-"),
+    split?formatHours_(split.day):"-",
+    split?formatHours_(split.night):"-",
     String(record.id)
   ];
 }
