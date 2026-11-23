@@ -14,7 +14,7 @@ assert.ok(inline);
 assert.doesNotThrow(()=>new Function(inline));
 
 const scriptFns=new Function("Utilities",appScript+
-  "; return {payrollCycle_,rowFromAttendance_,duration_,safeSheetText_};")({
+  "; return {payrollCycle_,rowFromAttendance_,duration_,safeSheetText_,syncInfo_};")({
   formatDate(date,timezone,pattern){
     if(pattern==="yyyy-MM-dd")return date.toISOString().slice(0,10);
     const parts=new Intl.DateTimeFormat("en-GB",{
@@ -55,6 +55,33 @@ test("completed shift is counted only with a real checkout",()=>{
   assert.equal(scriptFns.duration_(normal),"3:00");
   assert.equal(scriptFns.duration_({...normal,status:"auto_missing_out"}),"-");
   assert.equal(scriptFns.rowFromAttendance_(normal)[4],"Хэвийн");
+});
+
+test("Info counts distinct completed days and ignores invalid checkout durations",()=>{
+  let written=[];
+  const info={
+    getLastRow(){return 2;},
+    getMaxRows(){return 1000;},
+    getRange(){return {
+      clearContent(){},
+      setValues(rows){written=rows;}
+    };}
+  };
+  const spreadsheet={getSheetByName(name){return name==="Info"?info:null;}};
+  const base={
+    employee_code:"123204",display_name:"Номинзул",branch_code:"Нарны Титэм",
+    work_date:"2026-11-23",status:"completed",
+    check_in_at:"2026-11-23T08:00:00Z",check_out_at:"2026-11-23T10:00:00Z"
+  };
+  const second={...base,id:2,check_in_at:"2026-11-23T11:00:00Z",check_out_at:"2026-11-23T14:00:00Z"};
+  const missing={...base,id:3,work_date:"2026-11-24",status:"auto_missing_out",
+    check_in_at:"2026-11-24T08:00:00Z",check_out_at:"2026-11-24T17:00:00Z"};
+  scriptFns.syncInfo_(spreadsheet,[base,second,missing]);
+  assert.equal(written.length,1);
+  assert.equal(written[0][0],"2026-11");
+  assert.equal(written[0][6],1,"same-date completed sessions count as one workday");
+  assert.equal(written[0][7],"5:00","only real checkout durations are counted");
+  assert.equal(written[0][8],1);
 });
 
 test("never allow spreadsheet formula injection from staff names",()=>{
