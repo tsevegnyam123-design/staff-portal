@@ -14,9 +14,10 @@ assert.ok(inline);
 assert.doesNotThrow(()=>new Function(inline));
 
 const scriptFns=new Function("Utilities",appScript+
-  "; return {payrollCycle_,rowFromAttendance_,duration_,safeSheetText_,syncInfo_};")({
+  "; return {payrollCycle_,rowFromAttendance_,duration_,dayNightMinutes_,safeSheetText_,syncInfo_};")({
   formatDate(date,timezone,pattern){
     if(pattern==="yyyy-MM-dd")return date.toISOString().slice(0,10);
+    if(pattern==="Z")return "+0800";
     const parts=new Intl.DateTimeFormat("en-GB",{
       timeZone:timezone,hour:"2-digit",minute:"2-digit",hourCycle:"h23"
     }).formatToParts(date);
@@ -43,7 +44,7 @@ test("employee Google Sheet shows next-day 01:00 closure as NOT a worked shift",
     check_in_at:"2026-11-23T08:00:00Z",check_out_at:"2026-11-23T17:00:00Z",
     status:"auto_missing_out"
   });
-  assert.deepEqual(row,["2026/11/23","16:00","01:00","-","Явсан дараагүй","17"]);
+  assert.deepEqual(row,["2026/11/23","16:00","01:00","-","Явсан дараагүй","-","-","17"]);
 });
 
 test("completed shift is counted only with a real checkout",()=>{
@@ -55,6 +56,7 @@ test("completed shift is counted only with a real checkout",()=>{
   assert.equal(scriptFns.duration_(normal),"3:00");
   assert.equal(scriptFns.duration_({...normal,status:"auto_missing_out"}),"-");
   assert.equal(scriptFns.rowFromAttendance_(normal)[4],"Хэвийн");
+  assert.deepEqual(scriptFns.dayNightMinutes_(normal),{total:180,day:180,night:0});
 });
 
 test("Info counts distinct completed days and ignores invalid checkout durations",()=>{
@@ -62,9 +64,14 @@ test("Info counts distinct completed days and ignores invalid checkout durations
   const info={
     getLastRow(){return 2;},
     getMaxRows(){return 1000;},
-    getRange(){return {
+    getMaxColumns(){return 12;},
+    setColumnWidths(){},
+    getRange(_a,_b,_c,_d){return {
       clearContent(){},
-      setValues(rows){written=rows;}
+      setValues(rows){if(rows.length===1 && rows[0].length===2)return;written=rows;},
+      setBackground(){return this;},
+      setFontColor(){return this;},
+      setFontWeight(){return this;}
     };}
   };
   const spreadsheet={getSheetByName(name){return name==="Info"?info:null;}};
@@ -82,6 +89,40 @@ test("Info counts distinct completed days and ignores invalid checkout durations
   assert.equal(written[0][6],1,"same-date completed sessions count as one workday");
   assert.equal(written[0][7],"5:00","only real checkout durations are counted");
   assert.equal(written[0][8],1);
+  assert.equal(written[0][10],"5:00");
+  assert.equal(written[0][11],"0:00");
+});
+
+test("22:00–06:00 night split works across midnight and early mornings",()=>{
+  function split(start,end){
+    return scriptFns.dayNightMinutes_({
+      status:"completed",check_in_at:start,check_out_at:end
+    });
+  }
+  // Asia/Ulaanbaatar is UTC+8 in 2026: 21:00->07:00 local = 2h day + 8h night.
+  assert.deepEqual(split("2026-11-23T13:00:00Z","2026-11-23T23:00:00Z"),
+    {total:600,day:120,night:480});
+  // 21:30->23:30 local = 30m day, 90m night.
+  assert.deepEqual(split("2026-11-23T13:30:00Z","2026-11-23T15:30:00Z"),
+    {total:120,day:30,night:90});
+  // 23:00->02:00 next day local = 3h night.
+  assert.deepEqual(split("2026-11-23T15:00:00Z","2026-11-23T18:00:00Z"),
+    {total:180,day:0,night:180});
+  // 05:00->09:00 local = 1h night + 3h day.
+  assert.deepEqual(split("2026-11-22T21:00:00Z","2026-11-23T01:00:00Z"),
+    {total:240,day:180,night:60});
+  // 14:15->17:15 local = 3h day.
+  assert.deepEqual(split("2026-11-20T06:15:00Z","2026-11-20T09:15:00Z"),
+    {total:180,day:180,night:0});
+  assert.equal(split("2026-11-20T06:15:00Z","2026-11-20T09:15:00Z").day+
+    split("2026-11-20T06:15:00Z","2026-11-20T09:15:00Z").night,180);
+});
+
+test("unfinished and auto-missing-out records yield no payable day/night hours",()=>{
+  const base={status:"auto_missing_out",check_in_at:"2026-11-23T08:00:00Z",
+    check_out_at:"2026-11-23T17:00:00Z"};
+  assert.equal(scriptFns.dayNightMinutes_(base),null);
+  assert.equal(scriptFns.dayNightMinutes_({...base,status:"open",check_out_at:null}),null);
 });
 
 test("never allow spreadsheet formula injection from staff names",()=>{
