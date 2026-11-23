@@ -569,7 +569,7 @@ async function loadAttendance(){
   const data=await r.json();
   if(!r.ok)throw new Error(data.error||"Ирцийн мэдээлэл ачаалж чадсангүй.");
   state.attendance=data;
-  const open=(data.entries||[]).find(x=>x.status==="open");
+  const open=data.open||(data.entries||[]).find(x=>x.status==="open");
   $("clockIn").disabled=!data.configured||!!open;
   $("clockOut").disabled=!data.configured||!open;
   $("attendanceStatusText").textContent=!data.configured
