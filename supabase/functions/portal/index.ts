@@ -106,6 +106,18 @@ async function db(method, path, payload, extras = {}) {
   const raw = await response.text();
   if (!response.ok) {
     console.error("portal database error", response.status, raw.slice(0, 500));
+    if (path.includes("portal_v2_attendance_")) {
+      const message = String(parseResponse(raw)?.message || "");
+      const known = [
+        ["Outside permitted attendance location",403,"Та салбарын зөвшөөрсөн байршлаас гадуур байна."],
+        ["A precise (100m or better) location fix is required",400,"Байршлын нарийвчлал хангалтгүй (100 м-ээс сайн GPS шаардлагатай)."],
+        ["Branch location has not been configured",409,"Менежер салбарын ирцийн байршлыг хараахан тохируулаагүй."],
+        ["You have already checked in",409,"Ирсэн цаг өмнө нь бүртгэгдсэн байна."],
+        ["No active check-in found",409,"Нээлттэй ирц байхгүй байна."],
+        ["Checkout cutoff passed",409,"01:00 цаг өнгөрсөн тул бүртгэл 'Явсан дараагүй' төлөвтэй болсон."]
+      ].find(x=>message.includes(x[0]));
+      if(known) fail(known[1],known[2]);
+    }
     fail(response.status === 409 ? 409 : 500,
       response.status === 409 ? "Энэ кодтой ажилтан бүртгэлтэй байна." : "Мэдээллийн санд алдаа гарлаа.");
   }
@@ -167,6 +179,34 @@ async function dashboard(user, month) {
   return { user, staff: [], shifts, cash, month, period: range };
 }
 
+
+async function attendanceStatus(user, month) {
+  const range=monthRange(month);
+  await db("POST","/rest/v1/rpc/portal_v2_attendance_auto_close",{});
+  const sites=await db("GET","/rest/v1/portal_v2_attendance_sites?select=branch_code,latitude,longitude,radius_m&branch_code=eq."+q(user.branch_code)+"&limit=1");
+  const site=sites?.[0]||null;
+  const attendance=await db("GET","/rest/v1/portal_v2_attendance?select=id,work_date,check_in_at,check_out_at,status,auto_due_at&employee_code=eq."+
+    q(user.employee_code)+"&work_date=gte."+range.from+"&work_date=lt."+range.next+"&order=check_in_at.desc&limit=150");
+  // Employee never receives the configured branch centre coordinates.
+  return {
+    configured:!!site,
+    site:user.access_role==="manager"?site:null,
+    period:range,
+    entries:attendance
+  };
+}
+
+async function requireAttendanceExport(req) {
+  const configured=Deno.env.get("GOOGLE_SHEETS_SYNC_TOKEN")||"";
+  ensure(configured.length>=32,503,"Google Sheets integration is not configured.");
+  const provided=String(req.headers["x-attendance-sync"]||"");
+  ensure(provided.length>=32 && provided.length<=512,403,"Forbidden.");
+  const expected=await hash(configured),actual=await hash(provided);
+  let mismatch=expected.length!==actual.length?1:0;
+  for(let i=0;i<expected.length;i++) mismatch|=expected.charCodeAt(i)^actual.charCodeAt(i);
+  ensure(mismatch===0,403,"Forbidden.");
+}
+
 async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store, max-age=0");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -184,6 +224,16 @@ async function handler(req, res) {
       ensure(Number(req.headers["content-length"] || 0) <= 12000, 413, "Хэт их мэдээлэл.");
     }
     const data = bodyOf(req);
+    // Scheduled Google Apps Script sync: no browser location and no employee cookie.
+    if (action === "attendanceExport" && req.method === "GET") {
+      await requireAttendanceExport(req);
+      await db("POST","/rest/v1/rpc/portal_v2_attendance_auto_close",{});
+      const offset=Number(req.query.offset||0);
+      ensure(Number.isSafeInteger(offset)&&offset>=0&&offset<=1000000,400,"Invalid offset.");
+      const rows=await db("POST","/rest/v1/rpc/portal_v2_attendance_export",
+        {p_offset:offset,p_limit:300});
+      return res.status(200).json({rows,nextOffset:rows.length===300?offset+300:null});
+    }
     if (action === "login" && req.method === "POST") {
       const code = String(data.code || "").trim();
       const pin = String(data.pin || "");
@@ -216,6 +266,29 @@ async function handler(req, res) {
     if (action === "dashboard" && req.method === "GET") {
       const month = String(req.query.month || defaultPeriodMonth());
       return res.status(200).json(await dashboard(user, month));
+    }
+    if (action === "attendanceStatus" && req.method === "GET") {
+      const month=String(req.query.month||defaultPeriodMonth());
+      return res.status(200).json(await attendanceStatus(user,month));
+    }
+    if (action === "attendanceClock" && req.method === "POST") {
+      ensure(["in","out"].includes(data.type),400,"Ирсэн эсвэл Явсан үйлдэл сонгоно уу.");
+      const lat=Number(data.latitude),lng=Number(data.longitude),accuracy=Number(data.accuracy);
+      ensure(Number.isFinite(lat)&&Number.isFinite(lng)&&Number.isFinite(accuracy),400,"Байршлын мэдээлэл буруу байна.");
+      const record=await db("POST","/rest/v1/rpc/portal_v2_attendance_clock",{
+        p_employee:user.employee_code,p_action:data.type,p_lat:lat,p_lng:lng,p_accuracy:accuracy
+      });
+      return res.status(200).json({ok:true,record});
+    }
+    if (action === "attendanceSetSite" && req.method === "POST") {
+      checkManager(user);
+      const lat=Number(data.latitude),lng=Number(data.longitude),radius=Number(data.radius);
+      ensure(Number.isFinite(lat)&&Number.isFinite(lng)&&Number.isInteger(radius)&&radius>=50&&radius<=500,
+        400,"Салбарын байршил, радиус буруу байна.");
+      await db("POST","/rest/v1/rpc/portal_v2_attendance_set_site",{
+        p_manager:user.employee_code,p_lat:lat,p_lng:lng,p_radius:radius
+      });
+      return res.status(200).json({ok:true});
     }
 
     checkManager(user);
@@ -335,6 +408,7 @@ Deno.serve(async (request) => {
     body,
     headers: {
       "x-portal-session": request.headers.get("x-portal-session") || "",
+      "x-attendance-sync": request.headers.get("x-attendance-sync") || "",
       "origin": "",
       "host": "",
       "sec-fetch-site": "same-origin",
