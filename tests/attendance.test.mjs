@@ -149,6 +149,26 @@ test("server enforces the approved branch Wi-Fi IP, not browser-supplied coordin
   assert.match(inline,/Явсан дараагүй/);
 });
 
+test("approved Wi-Fi accepts exact IP, denies other IP, and fails closed when not configured",async()=>{
+  const start=edge.indexOf("function isIPv4(value) {");
+  const end=edge.indexOf("async function attendanceStatus(",start);
+  assert.ok(start>=0&&end>start);
+  const make=rows=>new Function("db","q",edge.slice(start,end)+
+    "\nreturn {attendanceWiFi};")(async()=>rows,encodeURIComponent);
+  const user={employee_code:"123204",branch_code:"Нарны Титэм",access_role:"employee"};
+  const manager={...user,access_role:"manager"};
+  const stored=[{branch_code:"Нарны Титэм",allowed_ipv4:"112.72.7.161/32"}];
+  const api=make(stored);
+  assert.deepEqual(await api.attendanceWiFi(user,"112.72.7.161"),
+    {configured:true,connected:true,displayIP:null});
+  assert.deepEqual(await api.attendanceWiFi(manager,"112.72.7.161"),
+    {configured:true,connected:true,displayIP:"112.72.7.161"});
+  assert.equal((await api.attendanceWiFi(user,"112.72.7.162")).connected,false);
+  assert.equal((await api.attendanceWiFi(user,"112.72.7.161, 1.2.3.4")).connected,false);
+  assert.equal((await api.attendanceWiFi(user,"")).connected,false);
+  assert.equal((await make([]).attendanceWiFi(user,"112.72.7.161")).configured,false);
+});
+
 test("private Sheets export requires server configured long-lived secret",()=>{
   assert.match(edge,/GOOGLE_SHEETS_SYNC_TOKEN/);
   assert.match(edge,/await requireAttendanceExport\(req\)/);
