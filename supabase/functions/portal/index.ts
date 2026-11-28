@@ -180,11 +180,33 @@ async function dashboard(user, month) {
 }
 
 
-async function attendanceStatus(user, month) {
+// Hosted gateway source-IP header only. Never trust browser JSON, X-Forwarded-For,
+// X-Real-IP or caller-provided query values as proof of a branch network.
+// Missing/malformed/IPv6 caller address => fail closed for IPv4-only allowlist.
+function isIPv4(value) {
+  if (typeof value !== "string" || !/^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(value)) return false;
+  return value.split(".").every(part=>part.length===1||part[0]!=="0") &&
+    value.split(".").every(part=>Number(part)<=255);
+}
+
+async function attendanceWiFi(user, rawClientIP) {
+  const rows=await db("GET", "/rest/v1/portal_v2_attendance_allowed_ips?select=branch_code,allowed_ipv4&branch_code=eq."+q(user.branch_code)+"&limit=1");
+  const record=rows?.[0]||null;
+  const ip=isIPv4(rawClientIP)?rawClientIP:null;
+  // PostgREST inet is returned as address or host/network string.
+  const allowed=record?.allowed_ipv4?.split("/")[0]||"";
+  return {
+    configured:!!record,
+    connected:!!ip && ip===allowed,
+    // The IP is admin diagnostic information; not transmitted to staff.
+    displayIP:user.access_role==="manager"?allowed:null
+  };
+}
+
+async function attendanceStatus(user, month, clientIP) {
   const range=monthRange(month);
   await db("POST","/rest/v1/rpc/portal_v2_attendance_auto_close",{});
-  const sites=await db("GET","/rest/v1/portal_v2_attendance_sites?select=branch_code,latitude,longitude,radius_m&branch_code=eq."+q(user.branch_code)+"&limit=1");
-  const site=sites?.[0]||null;
+  const network=await attendanceWiFi(user,clientIP);
   const [attendance, currentlyOpen]=await Promise.all([
     db("GET","/rest/v1/portal_v2_attendance?select=id,work_date,check_in_at,check_out_at,status,auto_due_at&employee_code=eq."+
       q(user.employee_code)+"&work_date=gte."+range.from+"&work_date=lt."+range.next+"&order=check_in_at.desc&limit=150"),
@@ -193,8 +215,9 @@ async function attendanceStatus(user, month) {
   ]);
   // Employee never receives the configured branch centre coordinates.
   return {
-    configured:!!site,
-    site:user.access_role==="manager"?site:null,
+    configured:network.configured,
+    onAllowedWiFi:network.connected,
+    approvedIP:network.displayIP,
     period:range,
     open:currentlyOpen?.[0]||null,
     entries:attendance
@@ -274,16 +297,15 @@ async function handler(req, res) {
     }
     if (action === "attendanceStatus" && req.method === "GET") {
       const month=String(req.query.month||defaultPeriodMonth());
-      return res.status(200).json(await attendanceStatus(user,month));
+      return res.status(200).json(await attendanceStatus(user,month,req.headers["trusted-cf-connecting-ip"]));
     }
     if (action === "attendanceClock" && req.method === "POST") {
       ensure(["in","out"].includes(data.type),400,"Ирсэн эсвэл Явсан үйлдэл сонгоно уу.");
-      ensure(typeof data.latitude==="number"&&typeof data.longitude==="number"&&
-        typeof data.accuracy==="number",400,"Байршлын мэдээлэл буруу байна.");
-      const lat=data.latitude,lng=data.longitude,accuracy=data.accuracy;
-      ensure(Number.isFinite(lat)&&Number.isFinite(lng)&&Number.isFinite(accuracy),400,"Байршлын мэдээлэл буруу байна.");
-      const record=await db("POST","/rest/v1/rpc/portal_v2_attendance_clock",{
-        p_employee:user.employee_code,p_action:data.type,p_lat:lat,p_lng:lng,p_accuracy:accuracy
+      const network=await attendanceWiFi(user,req.headers["trusted-cf-connecting-ip"]);
+      ensure(network.configured,409,"Салбарын Wi-Fi IP хараахан тохируулаагүй байна.");
+      ensure(network.connected,403,"Зөвшөөрөгдсөн салбарын Wi-Fi-д холбогдоно уу. Мобайл дата, VPN болон өөр сүлжээнээс ирц дарах боломжгүй.");
+      const record=await db("POST","/rest/v1/rpc/portal_v2_attendance_clock_wifi",{
+        p_employee:user.employee_code,p_action:data.type
       });
       return res.status(200).json({ok:true,record});
     }
@@ -417,6 +439,7 @@ Deno.serve(async (request) => {
     headers: {
       "x-portal-session": request.headers.get("x-portal-session") || "",
       "x-attendance-sync": request.headers.get("x-attendance-sync") || "",
+      "trusted-cf-connecting-ip": request.headers.get("cf-connecting-ip") || "",
       "origin": "",
       "host": "",
       "sec-fetch-site": "same-origin",

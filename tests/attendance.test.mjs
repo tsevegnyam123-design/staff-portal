@@ -131,18 +131,42 @@ test("never allow spreadsheet formula injection from staff names",()=>{
   assert.equal(scriptFns.safeSheetText_("Номинзул"),"Номинзул");
 });
 
-test("server and database enforce GPS on every clock action",()=>{
-  assert.match(sql,/p_accuracy > 100/);
-  assert.match(sql,/Outside permitted attendance location/);
-  assert.match(sql,/distance_m > loc\.radius_m/);
-  assert.match(sql,/check_in_at timestamptz not null/);
-  assert.match(sql,/auto_due_at timestamptz not null/);
-  assert.match(sql,/auto_missing_out/);
-  assert.match(edge,/p_employee:user\.employee_code/);
+test("server enforces the approved branch Wi-Fi IP, not browser-supplied coordinates",()=>{
+  const wiFiSQL=readFileSync("database/portal_v2_attendance_wifi.sql","utf8");
+  assert.match(wiFiSQL,/112\.72\.7\.161/);
+  assert.match(wiFiSQL,/Нарны Титэм/);
+  assert.match(wiFiSQL,/portal_v2_attendance_clock_wifi/);
+  assert.match(wiFiSQL,/revoke all on public\.portal_v2_attendance_allowed_ips/);
+  assert.match(wiFiSQL,/revoke all on function public\.portal_v2_attendance_clock_wifi/);
+  assert.match(edge,/request\.headers\.get\("cf-connecting-ip"\)/);
+  assert.match(edge,/attendanceWiFi\(user,req\.headers\["trusted-cf-connecting-ip"\]\)/);
+  assert.match(edge,/ensure\(network\.connected,403/);
+  assert.match(edge,/portal_v2_attendance_clock_wifi/);
   assert.match(edge,/const user = await current\(req\)/);
-  assert.match(edge,/attendanceSetSite/);
-  assert.match(edge,/attendanceClock/);
-  assert.match(inline,/navigator\.geolocation\.getCurrentPosition/);
+  assert.ok(!inline.includes("navigator.geolocation.getCurrentPosition"));
+  assert.ok(!inline.includes('api("attendanceClock",{type,...position})'));
+  assert.match(inline,/!data\.onAllowedWiFi/);
+  assert.match(inline,/Явсан дараагүй/);
+});
+
+test("approved Wi-Fi accepts exact IP, denies other IP, and fails closed when not configured",async()=>{
+  const start=edge.indexOf("function isIPv4(value) {");
+  const end=edge.indexOf("async function attendanceStatus(",start);
+  assert.ok(start>=0&&end>start);
+  const make=rows=>new Function("db","q",edge.slice(start,end)+
+    "\nreturn {attendanceWiFi};")(async()=>rows,encodeURIComponent);
+  const user={employee_code:"123204",branch_code:"Нарны Титэм",access_role:"employee"};
+  const manager={...user,access_role:"manager"};
+  const stored=[{branch_code:"Нарны Титэм",allowed_ipv4:"112.72.7.161/32"}];
+  const api=make(stored);
+  assert.deepEqual(await api.attendanceWiFi(user,"112.72.7.161"),
+    {configured:true,connected:true,displayIP:null});
+  assert.deepEqual(await api.attendanceWiFi(manager,"112.72.7.161"),
+    {configured:true,connected:true,displayIP:"112.72.7.161"});
+  assert.equal((await api.attendanceWiFi(user,"112.72.7.162")).connected,false);
+  assert.equal((await api.attendanceWiFi(user,"112.72.7.161, 1.2.3.4")).connected,false);
+  assert.equal((await api.attendanceWiFi(user,"")).connected,false);
+  assert.equal((await make([]).attendanceWiFi(user,"112.72.7.161")).configured,false);
 });
 
 test("private Sheets export requires server configured long-lived secret",()=>{
@@ -154,8 +178,25 @@ test("private Sheets export requires server configured long-lived secret",()=>{
   assert.match(appScript,/ScriptApp\.newTrigger\("synchronizeAttendance"\)/);
 });
 
-test("manager site must be configured before clock buttons are enabled",()=>{
-  assert.match(inline,/!data\.configured\|\|!!open/);
-  assert.match(inline,/!data\.configured\|\|!open/);
-  assert.match(inline,/Явсан дараагүй/);
+test("employee clock buttons require connected approved Wi-Fi",()=>{
+  assert.match(inline,/!data\.configured\|\|!data\.onAllowedWiFi\|\|!!open/);
+  assert.match(inline,/!data\.configured\|\|!data\.onAllowedWiFi\|\|!open/);
+  assert.match(inline,/Мобайл дата\/VPN/);
 });
+
+test("reject invalid or proxy-supplied IP fallback",()=>{
+  const start=edge.indexOf("function isIPv4(value) {");
+  const end=edge.indexOf("async function attendanceWiFi(",start);
+  assert.ok(start>=0&&end>start);
+  const {isIPv4}=new Function(edge.slice(start,end)+";return {isIPv4};")();
+  assert.ok(isIPv4("112.72.7.161"));
+  for(const ip of ["","112.72.7.161, 10.0.0.1","112.72.7.161/32","112.72.7.999",
+    "0112.72.7.161","::1",null,"10.0.0.1"]) {
+    if(ip==="10.0.0.1")continue; // valid IPv4, just not allowlisted
+    assert.equal(isIPv4(ip),false,"Must reject malformed client IP");
+  }
+  const attendanceBlock=edge.slice(edge.indexOf("async function attendanceWiFi("),
+    edge.indexOf("async function attendanceStatus("));
+  assert.ok(!attendanceBlock.includes("x-forwarded-for"));
+});
+
