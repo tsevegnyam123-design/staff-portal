@@ -98,7 +98,7 @@ function createEmployeeSheet_(book,code,displayName){
   tab.getRange("A2:E2").setValues([[
     "Өдөр","Ирсэн цаг","Явсан цаг","Нийт ажилласан цаг","Тайлбар"
   ]]);
-  tab.getRange("A2:H2").setBackground("#244d99").setFontColor("#ffffff").setFontWeight("bold");
+  tab.getRange("A2:J2").setBackground("#244d99").setFontColor("#ffffff").setFontWeight("bold");
   tab.setFrozenRows(2);
   tab.setColumnWidths(1,5,155);
   return tab;
@@ -106,8 +106,8 @@ function createEmployeeSheet_(book,code,displayName){
 
 /** Preserve existing portal IDs when migrating old F-id sheet to F/G day/night + H-id. */
 function ensureEmployeeLayout_(tab){
-  if(tab.getMaxColumns()<8){
-    tab.insertColumnsAfter(tab.getMaxColumns(),8-tab.getMaxColumns());
+  if(tab.getMaxColumns()<10){
+    tab.insertColumnsAfter(tab.getMaxColumns(),10-tab.getMaxColumns());
   }
   const fHeader=String(tab.getRange("F2").getDisplayValue()).trim();
   const hHeader=String(tab.getRange("H2").getDisplayValue()).trim();
@@ -127,12 +127,15 @@ function ensureEmployeeLayout_(tab){
       tab.getRange(3,6,last-2,1).clearContent();
     }
   }
-  tab.getRange("F2:H2").setValues([["Өдрийн цаг","Шөнийн цаг","Portal record ID"]]);
-  tab.getRange("F2:H2").setBackground("#244d99").setFontColor("#ffffff").setFontWeight("bold");
+  tab.getRange("F2:J2").setValues([[
+    "Өдрийн цаг","Шөнийн цаг","Portal record ID","Ирсэн төхөөрөмж","Явсан төхөөрөмж"
+  ]]);
+  tab.getRange("F2:J2").setBackground("#244d99").setFontColor("#ffffff").setFontWeight("bold");
   tab.showColumns(6);
   tab.showColumns(7);
   tab.hideColumns(8);
   tab.setColumnWidths(6,2,135);
+  tab.setColumnWidths(9,2,180);
 }
 
 function timeInUlaanbaatar_(timestamp) {
@@ -210,7 +213,11 @@ function rowFromAttendance_(record){
     status,
     split?formatHours_(split.day):"-",
     split?formatHours_(split.night):"-",
-    String(record.id)
+    String(record.id),
+    safeSheetText_(record.check_in_device||"—"),
+    record.status==="completed"
+      ?safeSheetText_(record.check_out_device||"—")
+      :"—"
   ];
 }
 
@@ -234,9 +241,9 @@ function syncEmployeeSheets_(records,tabs){
       const id=String(record.id);
       if(byId.has(id)){
         const rowIdx=byId.get(id);
-        const current=tab.getRange(rowIdx,1,1,8).getDisplayValues()[0];
+        const current=tab.getRange(rowIdx,1,1,10).getDisplayValues()[0];
         if(current.some((value,i)=>String(value)!==String(row[i]))) {
-          tab.getRange(rowIdx,1,1,8).setValues([row]);
+          tab.getRange(rowIdx,1,1,10).setValues([row]);
         }
         markAttendanceStatus_(tab,rowIdx,record.status);
       }else{
@@ -247,7 +254,7 @@ function syncEmployeeSheets_(records,tabs){
       const index=Math.max(3,tab.getLastRow()+1);
       if(tab.getMaxRows()<index+newRows.length-1)
         tab.insertRowsAfter(tab.getMaxRows(),index+newRows.length-1-tab.getMaxRows());
-      tab.getRange(index,1,newRows.length,8).setValues(newRows.map(v=>v.row));
+      tab.getRange(index,1,newRows.length,10).setValues(newRows.map(v=>v.row));
       for(let i=0;i<newRows.length;i++) markAttendanceStatus_(tab,index+i,newRows[i].record.status);
     }
   }

@@ -44,7 +44,7 @@ test("employee Google Sheet shows next-day 01:00 closure as NOT a worked shift",
     check_in_at:"2026-11-23T08:00:00Z",check_out_at:"2026-11-23T17:00:00Z",
     status:"auto_missing_out"
   });
-  assert.deepEqual(row,["2026/11/23","16:00","01:00","-","Явсан дараагүй","-","-","17"]);
+  assert.deepEqual(row,["2026/11/23","16:00","01:00","-","Явсан дараагүй","-","-","17","—","—"]);
 });
 
 test("completed shift is counted only with a real checkout",()=>{
@@ -167,6 +167,55 @@ test("approved Wi-Fi accepts exact IP, denies other IP, and fails closed when no
   assert.equal((await api.attendanceWiFi(user,"112.72.7.161, 1.2.3.4")).connected,false);
   assert.equal((await api.attendanceWiFi(user,"")).connected,false);
   assert.equal((await make([]).attendanceWiFi(user,"112.72.7.161")).configured,false);
+});
+
+test("check-in/out browser device labels are normalized and not raw User-Agent fingerprints",()=>{
+  const start=edge.indexOf("function attendanceDeviceLabel(userAgent) {");
+  const end=edge.indexOf("async function attendanceStatus(",start);
+  assert.ok(start>0 && end>start);
+  const {attendanceDeviceLabel}=new Function(edge.slice(start,end)+";return {attendanceDeviceLabel};")();
+  assert.equal(attendanceDeviceLabel("Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1"),"iPhone · iOS · Safari");
+  assert.equal(attendanceDeviceLabel("Mozilla/5.0 (Linux; Android 14; SM-S918B Build/X) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0 Mobile Safari/537.36"),"SM-S918B · Android · Samsung Internet");
+  assert.equal(attendanceDeviceLabel("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) FBAN/FBIOS; FBAV/450.0"),"iPhone · iOS · Messenger");
+  assert.ok(attendanceDeviceLabel("x".repeat(3000)).length<=120);
+  assert.match(edge,/request\.headers\.get\("user-agent"\)/);
+  assert.match(edge,/p_device:device/);
+  assert.match(edge,/portal_v2_attendance_clock_wifi_device/);
+  assert.ok(!edge.includes("raw_user_agent"));
+});
+
+test("Google Sheet keeps H record IDs and exports device data to I and J separately",()=>{
+  const schema=readFileSync("database/portal_v2_attendance_devices.sql","utf8");
+  const exportSql=readFileSync("database/portal_v2_attendance_export_devices.sql","utf8");
+  assert.match(schema,/check_in_device text/);
+  assert.match(schema,/check_out_device text/);
+  assert.match(schema,/check_in_device\)/);
+  assert.match(schema,/check_out_device=p_device/);
+  assert.match(exportSql,/t\.check_in_device,t\.check_out_device/);
+  assert.match(appScript,/Portal record ID","Ирсэн төхөөрөмж","Явсан төхөөрөмж/);
+  assert.match(appScript,/getRange\(3,8,last-2,1\)/);
+  assert.match(appScript,/getRange\(rowIdx,1,1,10\)/);
+  assert.match(appScript,/getRange\(index,1,newRows\.length,10\)/);
+  const normal=scriptFns.rowFromAttendance_({
+    id:23,work_date:"2026-11-28",status:"completed",
+    check_in_at:"2026-11-28T08:00:00Z",check_out_at:"2026-11-28T10:00:00Z",
+    check_in_device:"iPhone · iOS · Safari",
+    check_out_device:"SM-S918B · Android · Chrome"
+  });
+  assert.equal(normal.length,10);
+  assert.equal(normal[7],"23");
+  assert.equal(normal[8],"iPhone · iOS · Safari");
+  assert.equal(normal[9],"SM-S918B · Android · Chrome");
+  const open=scriptFns.rowFromAttendance_({
+    id:24,work_date:"2026-11-28",status:"open",
+    check_in_at:"2026-11-28T08:00:00Z",check_out_at:null,
+    check_in_device:"iPhone · iOS · Safari",check_out_device:null
+  });
+  assert.equal(open[9],"—");
+  const invalid=scriptFns.rowFromAttendance_({
+    ...open,status:"auto_missing_out",check_out_at:"2026-11-28T17:00:00Z"
+  });
+  assert.equal(invalid[9],"—","auto cutoff is not a real device checkout");
 });
 
 test("private Sheets export requires server configured long-lived secret",()=>{

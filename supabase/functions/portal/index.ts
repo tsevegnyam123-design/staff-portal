@@ -203,6 +203,33 @@ async function attendanceWiFi(user, rawClientIP) {
   };
 }
 
+// Approximate browser/OS information only, without keeping the full User-Agent.
+// Browser-reported values can be inaccurate or spoofed; this is not a hardware ID.
+function attendanceDeviceLabel(userAgent) {
+  const ua=String(userAgent||"").slice(0,700);
+  const android=/Android/i.test(ua),ios=/iPhone|iPad|iPod/i.test(ua);
+  let hardware="Төхөөрөмж";
+  if(/iPad/i.test(ua))hardware="iPad";
+  else if(/iPhone/i.test(ua))hardware="iPhone";
+  else if(android){
+    const model=ua.match(/Android[^;)]*;\s*([^;)]+)\s*(?:Build\/[^;)]+)?\)/i);
+    const candidate=(model?.[1]||"").replace(/\s*Build\/.*$/i,"").trim();
+    // Avoid storing arbitrarily long, identifying or untrusted strings.
+    hardware=/^(?:SM-[A-Z0-9-]{4,18}|Pixel\s+[0-9A-Za-z ]{1,18})$/i.test(candidate)
+      ?candidate:"Android";
+  } else if(/Windows NT/i.test(ua))hardware="Windows";
+  else if(/Macintosh|Mac OS X/i.test(ua))hardware="Mac";
+  else if(/Linux/i.test(ua))hardware="Linux";
+  const os=android?"Android":ios?"iOS":/Windows NT/i.test(ua)?"Windows":/Mac OS X|Macintosh/i.test(ua)?"macOS":"";
+  const browser=/SamsungBrowser\//i.test(ua)?"Samsung Internet":
+    /FBAN|FBAV|Messenger|FB_IAB/i.test(ua)?"Messenger":
+    /Edg(?:A|iOS)?\//i.test(ua)?"Edge":
+    /CriOS\/|Chrome\//i.test(ua)?"Chrome":
+    /FxiOS\/|Firefox\//i.test(ua)?"Firefox":
+    /Safari\//i.test(ua)?"Safari":"Браузер";
+  return [hardware,os,browser].filter((v,i,a)=>v && (i===0||v!==a[0])).join(" · ").slice(0,120);
+}
+
 async function attendanceStatus(user, month, clientIP) {
   const range=monthRange(month);
   await db("POST","/rest/v1/rpc/portal_v2_attendance_auto_close",{});
@@ -304,8 +331,9 @@ async function handler(req, res) {
       const network=await attendanceWiFi(user,req.headers["trusted-cf-connecting-ip"]);
       ensure(network.configured,409,"Салбарын Wi-Fi IP хараахан тохируулаагүй байна.");
       ensure(network.connected,403,"Зөвшөөрөгдсөн салбарын Wi-Fi-д холбогдоно уу. Мобайл дата, VPN болон өөр сүлжээнээс ирц дарах боломжгүй.");
-      const record=await db("POST","/rest/v1/rpc/portal_v2_attendance_clock_wifi",{
-        p_employee:user.employee_code,p_action:data.type
+      const device=attendanceDeviceLabel(req.headers["user-agent"]);
+      const record=await db("POST","/rest/v1/rpc/portal_v2_attendance_clock_wifi_device",{
+        p_employee:user.employee_code,p_action:data.type,p_device:device
       });
       return res.status(200).json({ok:true,record});
     }
@@ -440,6 +468,7 @@ Deno.serve(async (request) => {
       "x-portal-session": request.headers.get("x-portal-session") || "",
       "x-attendance-sync": request.headers.get("x-attendance-sync") || "",
       "trusted-cf-connecting-ip": request.headers.get("cf-connecting-ip") || "",
+      "user-agent": request.headers.get("user-agent") || "",
       "origin": "",
       "host": "",
       "sec-fetch-site": "same-origin",
