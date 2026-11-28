@@ -612,6 +612,7 @@ $("refreshBtn").addEventListener("click",()=>loadData().catch(e=>status(e.messag
 $("monthInput").addEventListener("change",()=>loadData().catch(e=>status(e.message,"error")));
 document.querySelectorAll("[data-tab]").forEach(button=>button.addEventListener("click",()=>{
   state.tab=button.dataset.tab;showTabs();status("");
+  if(state.tab==="location")loadAttendance().catch(e=>status(e.message,"error"));
 }));
 $("newRole").addEventListener("change",updateLevels);
 $("registerForm").addEventListener("submit",async e=>{
